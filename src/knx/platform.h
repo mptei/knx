@@ -12,7 +12,8 @@ class Platform
     virtual uint32_t currentSubnetMask() = 0;
     virtual uint32_t currentDefaultGateway() = 0;
     virtual void macAddress(uint8_t* data) = 0;
-
+    virtual uint32_t uniqueSerialNumber();
+    
     virtual void restart() = 0;
     virtual void fatalError() = 0;
 

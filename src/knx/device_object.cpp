@@ -19,7 +19,7 @@ void DeviceObject::readProperty(PropertyID propertyId, uint32_t start, uint32_t&
             pushWord(OT_DEVICE, data);
             break;
         case PID_SERIAL_NUMBER:
-            pushWord(_manufacturerId, data);
+            data = pushWord(_manufacturerId, data);
             pushInt(_bauNumber, data);
             break;
         case PID_MANUFACTURER_ID:

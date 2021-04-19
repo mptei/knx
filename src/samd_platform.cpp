@@ -27,6 +27,16 @@ SamdPlatform::SamdPlatform( HardwareSerial* s) : ArduinoPlatform(s)
 
 }
 
+uint32_t SamdPlatform::uniqueSerialNumber()
+{
+
+    uint32_t uniqueId = SERIAL_NUMBER_WORD_0 ^ SERIAL_NUMBER_WORD_1 ^ SERIAL_NUMBER_WORD_2 ^ SERIAL_NUMBER_WORD_3;
+
+    printf("uniqueSerialNumber: %0X", uniqueId);
+
+    return uniqueId;
+}
+
 void SamdPlatform::restart()
 {
     println("restart");

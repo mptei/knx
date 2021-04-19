@@ -8,6 +8,9 @@ uint8_t* Platform::referenceNVMemory()
     return _memoryReference;
 }
 
+uint32_t Platform::uniqueSerialNumber() {
+    return 0;
+}
 
 uint8_t* Platform::allocMemory(size_t size)
 {
