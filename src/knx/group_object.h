@@ -14,7 +14,8 @@ enum ComFlag
     WriteRequest = 2, //!< Write was requested but was not processed
     Transmitting = 3, //!< Group Object is processed a the moment (read or write)
     Ok = 4,           //!< read or write request were send successfully
-    Error = 5         //!< there was an error on processing a request
+    Error = 5,        //!< there was an error on processing a request
+    New = 6           //!< new KO, its value is not valid
 };
 
 class GroupObject;
