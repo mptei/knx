@@ -9,6 +9,9 @@
 #include <stdio.h>
 #include <string.h>
 
+// Activate trace output
+//#define DBG_TRACE
+
 // NCN5120
 //#define NCN5120
 
@@ -73,24 +76,27 @@
 #define U_STOP_MODE_IND       0x2B
 #define U_SYSTEM_STAT_IND     0x4B
 
-//loop states
-#define IDLE                0
-#define RX_FIRST_BYTE       1
-#define RX_L_DATA           2
-#define RX_WAIT_DATA_CON    3
-#define TX_FRAME            4
+//tx states
+enum {
+    TX_IDLE,
+    TX_FRAME,
+    TX_WAIT_ECHO,
+    TX_WAIT_CONN
+};
 
-#define BYTE_TIMEOUT          10   //milli seconds
+//rx states
+enum {
+    RX_WAIT_START,
+    RX_L_DATA,
+    RX_WAIT_EOP
+};
+
+#define EOP_TIMEOUT           2   //milli seconds; end of layer-2 packet gap
 #define CONFIRM_TIMEOUT       500  //milli seconds
 #define RESET_TIMEOUT         100 //milli seconds
 
 void TpUartDataLinkLayer::loop()
 {
-
-    _receiveBuffer[0] = 0x29;
-    _receiveBuffer[1] = 0;
-    uint8_t* buffer = _receiveBuffer + 2;
-    uint8_t rxByte;
 
     if (!_enabled)
     {
@@ -106,134 +112,140 @@ void TpUartDataLinkLayer::loop()
         return;
 
     do {
-        switch (_loopState)
+        _receiveBuffer[0] = 0x29;
+        _receiveBuffer[1] = 0;
+        uint8_t* buffer = _receiveBuffer + 2;
+        uint8_t rxByte;
+        bool isEchoComplete = false;    // Flag that a complete echo is received
+        bool dataConnMsg = 0;  // The DATA_CONN message just seen or 0
+        bool isEOP = (millis() - _lastByteRxTime > EOP_TIMEOUT); // Flag that an EOP gap is seen
+        switch (_rxState)
         {
-            case IDLE:
+            case RX_WAIT_START:
                 if (_platform.uartAvailable())
                 {
-                    _loopState = RX_FIRST_BYTE;
-                }
-                else
-                {
-                    if (!_waitConfirm && !isTxQueueEmpty())
-                    {
-                        loadNextTxFrame();
-                        _loopState = TX_FRAME;
-                    }
-                }
-                break;
-            case TX_FRAME:
-                if (sendSingleFrameByte() == false)
-                {
-                    _waitConfirm = true;
-                    _waitConfirmStartTime = millis();
-                    _loopState = IDLE;
-                }
-                break;
-            case RX_FIRST_BYTE:
-                rxByte = _platform.readUart();
-                _lastByteRxTime = millis();
-                _RxByteCnt = 0;
-                _xorSum = 0;
-                if ((rxByte & L_DATA_MASK) == L_DATA_STANDARD_IND)
-                {
-                    buffer[_RxByteCnt++] = rxByte;
-                    _xorSum ^= rxByte;
-                    _RxByteCnt++; //convert to L_DATA_EXTENDED
-                    _convert = true;
-                    _loopState = RX_L_DATA;
-                    break;
-                }
-                else if ((rxByte & L_DATA_MASK) == L_DATA_EXTENDED_IND)
-                {
-                    buffer[_RxByteCnt++] = rxByte;
-                    _xorSum ^= rxByte;
-                    _convert = false;
-                    _loopState = RX_L_DATA;
-                    break;
-                }
-                else if ((rxByte & L_DATA_CON_MASK) == L_DATA_CON)
-                {
-                    println("got unexpected L_DATA_CON");
-                }
-                else if (rxByte == L_POLL_DATA_IND)
-                {
-                    // not sure if this can happen
-                    println("got L_POLL_DATA_IND");
-                }
-                else if ((rxByte & L_ACKN_MASK) == L_ACKN_IND)
-                {
-                    // this can only happen in bus monitor mode
-                    println("got L_ACKN_IND");
-                }
-                else if (rxByte == U_RESET_IND)
-                {
-                    println("got U_RESET_IND");
-                }
-                else if ((rxByte & U_STATE_IND) == U_STATE_IND)
-                {
-                    print("got U_STATE_IND: 0x");
+                    rxByte = _platform.readUart();
+#ifdef DBG_TRACE
                     print(rxByte, HEX);
-                    println();
-                }
-                else if ((rxByte & U_FRAME_STATE_MASK) == U_FRAME_STATE_IND)
-                {
-                    print("got U_FRAME_STATE_IND: 0x");
-                    print(rxByte, HEX);
-                    println();
-                }
-                else if ((rxByte & U_CONFIGURE_MASK) == U_CONFIGURE_IND)
-                {
-                    print("got U_CONFIGURE_IND: 0x");
-                    print(rxByte, HEX);
-                    println();
-                }
-                else if (rxByte == U_FRAME_END_IND)
-                {
-                    println("got U_FRAME_END_IND");
-                }
-                else if (rxByte == U_STOP_MODE_IND)
-                {
-                    println("got U_STOP_MODE_IND");
-                }
-                else if (rxByte == U_SYSTEM_STAT_IND)
-                {
-                    print("got U_SYSTEM_STAT_IND: 0x");
-                    while (true)
-                    {
-                        int tmp = _platform.readUart();
-                        if (tmp < 0)
-                            continue;
+#endif
+                    _lastByteRxTime = millis();
 
-                        print(tmp, HEX);
+                    // Check for layer-2 packets
+                    _RxByteCnt = 0;
+                    _xorSum = 0;
+                    if ((rxByte & L_DATA_MASK) == L_DATA_STANDARD_IND)
+                    {
+                        buffer[_RxByteCnt++] = rxByte;
+                        _xorSum ^= rxByte;
+                        _RxByteCnt++; //convert to L_DATA_EXTENDED
+                        _convert = true;
+                        _rxState = RX_L_DATA;
+#ifdef DBG_TRACE
+                        println("RLS");
+#endif
                         break;
                     }
-                    println();
+                    else if ((rxByte & L_DATA_MASK) == L_DATA_EXTENDED_IND)
+                    {
+                        buffer[_RxByteCnt++] = rxByte;
+                        _xorSum ^= rxByte;
+                        _convert = false;
+                        _rxState = RX_L_DATA;
+#ifdef DBG_TRACE
+                        println("RLX");
+#endif
+                        break;
+                    }
+
+                    // Handle all single byte packets here
+                    else if ((rxByte & L_DATA_CON_MASK) == L_DATA_CON)
+                    {
+                        dataConnMsg = rxByte;
+                    }
+                    else if (rxByte == L_POLL_DATA_IND)
+                    {
+                        // not sure if this can happen
+                        println("got L_POLL_DATA_IND");
+                    }
+                    else if ((rxByte & L_ACKN_MASK) == L_ACKN_IND)
+                    {
+                        // this can only happen in bus monitor mode
+                        println("got L_ACKN_IND");
+                    }
+                    else if (rxByte == U_RESET_IND)
+                    {
+                        println("got U_RESET_IND");
+                    }
+                    else if ((rxByte & U_STATE_IND) == U_STATE_IND)
+                    {
+                        print("got U_STATE_IND:");
+                        if (rxByte & 0x80) print (" SC");
+                        if (rxByte & 0x40) print (" RE");
+                        if (rxByte & 0x20) print (" TE");
+                        if (rxByte & 0x10) print (" PE");
+                        if (rxByte & 0x08) print (" TW");
+                        println();
+                    }
+                    else if ((rxByte & U_FRAME_STATE_MASK) == U_FRAME_STATE_IND)
+                    {
+                        print("got U_FRAME_STATE_IND: 0x");
+                        print(rxByte, HEX);
+                        println();
+                    }
+                    else if ((rxByte & U_CONFIGURE_MASK) == U_CONFIGURE_IND)
+                    {
+                        print("got U_CONFIGURE_IND: 0x");
+                        print(rxByte, HEX);
+                        println();
+                    }
+                    else if (rxByte == U_FRAME_END_IND)
+                    {
+                        println("got U_FRAME_END_IND");
+                    }
+                    else if (rxByte == U_STOP_MODE_IND)
+                    {
+                        println("got U_STOP_MODE_IND");
+                    }
+                    else if (rxByte == U_SYSTEM_STAT_IND)
+                    {
+                        print("got U_SYSTEM_STAT_IND: 0x");
+                        while (true)
+                        {
+                            int tmp = _platform.readUart();
+                            if (tmp < 0)
+                                continue;
+
+                            print(tmp, HEX);
+                            break;
+                        }
+                        println();
+                    }
+                    else
+                    {
+                        print("got UNEXPECTED: 0x");
+                        print(rxByte, HEX);
+                        println();
+                    }
                 }
-                else
-                {
-                    print("got UNEXPECTED: 0x");
-                    print(rxByte, HEX);
-                    println();
-                }
-                _loopState = IDLE;
                 break;
             case RX_L_DATA:
-                if (millis() - _lastByteRxTime > BYTE_TIMEOUT)
+                if (isEOP)
                 {
-                    _RxByteCnt = 0;
-                    _loopState = IDLE;
-                    println("Timeout during RX_L_DATA");
+                    _rxState = RX_WAIT_START;
+                    print("EOP inside RX_L_DATA");
+                    printHex(" => ", buffer, _RxByteCnt);
                     break;
                 }
                 if (!_platform.uartAvailable())
                     break;
                 _lastByteRxTime = millis();
                 rxByte = _platform.readUart();
-
+#ifdef DBG_TRACE
+                print(rxByte, HEX);
+#endif
                 if (_RxByteCnt == MAX_KNX_TELEGRAM_SIZE)
                 {
-                    _loopState = IDLE;
+                    _rxState = RX_WAIT_EOP;
                     println("invalid telegram size");
                 }
                 else
@@ -263,11 +275,14 @@ void TpUartDataLinkLayer::loop()
                         buffer[6] = payloadLength;
                     }
 
+
                     if (!_isEcho)
                     {
                         uint8_t c = 0x10;
 
-                        // take newest coding from current stack
+                        // The bau knows everything and could either check the address table object (normal device)
+                        // or any filter tables (coupler) to see if we are addressed.
+
                         //check if individual or group address
                         bool isGroupAddress = (buffer[1] & 0x80) != 0;
                         uint16_t addr = getWord(buffer + 4);
@@ -292,6 +307,8 @@ void TpUartDataLinkLayer::loop()
                                 println("Invalid broadcast detected: destination address is 0, but address type is \"individual\"");
                             }
                         }
+
+                        // Hint: We can send directly here, this doesn't disturb other transmissions
                         _platform.writeUart(c);
                     }
                 }
@@ -311,18 +328,21 @@ void TpUartDataLinkLayer::loop()
                         }
                         if (_isEcho)
                         {
-                            _loopState = RX_WAIT_DATA_CON;
+                            isEchoComplete = true;
                         }
                         else
                         {
                             frameBytesReceived(_receiveBuffer, _RxByteCnt + 2);
-                            _loopState = IDLE;
                         }
+                        _rxState = RX_WAIT_START;
+#ifdef DBG_TRACE
+                        println("RX_WAIT_START");
+#endif
                     }
                     else
                     {
                         println("frame with invalid crc ignored");
-                        _loopState = IDLE;
+                        _rxState = RX_WAIT_EOP;
                     }
                 }
                 else
@@ -330,61 +350,95 @@ void TpUartDataLinkLayer::loop()
                     _xorSum ^= rxByte;
                 }
                 break;
-            case RX_WAIT_DATA_CON:
+            case RX_WAIT_EOP:
+                if (isEOP)
+                {
+                    _RxByteCnt = 0;
+                    _rxState = RX_WAIT_START;
+#ifdef DBG_TRACE
+                    println("RX_WAIT_START");
+#endif
+                    break;
+                }
                 if (!_platform.uartAvailable())
                     break;
-                rxByte = _platform.readUart();
                 _lastByteRxTime = millis();
-                if ((rxByte & L_DATA_CON_MASK) == L_DATA_CON)
-                {
-                    //println("L_DATA_CON received");
-                    dataConBytesReceived(_receiveBuffer, _RxByteCnt + 2, ((rxByte & SUCCESS) > 0));
-                    _waitConfirm = false;
-                    delete[] _sendBuffer;
-                    _sendBuffer = 0;
-                    _sendBufferLength = 0;
-                    _loopState = IDLE;
-                }
-                else
-                {
-                    //should not happen
-                    println("expected L_DATA_CON not received");
-                    dataConBytesReceived(_receiveBuffer, _RxByteCnt + 2, false);
-                    _waitConfirm = false;
-                    delete[] _sendBuffer;
-                    _sendBuffer = 0;
-                    _sendBufferLength = 0;
-                    _loopState = IDLE;
-                }
+                rxByte = _platform.readUart();
+#ifdef DBG_TRACE
+                print(rxByte, HEX);
+#endif
                 break;
             default:
                 break;
         }
 
-        if (_waitConfirm)
-        {
-            if (millis() - _waitConfirmStartTime > CONFIRM_TIMEOUT)
-            {
-                println("L_DATA_CON not received within expected time");
-                uint8_t cemiBuffer[MAX_KNX_TELEGRAM_SIZE];
-                cemiBuffer[0] = 0x29;
-                cemiBuffer[1] = 0;
-                memcpy((cemiBuffer + 2), _sendBuffer, _sendBufferLength);
-                dataConBytesReceived(cemiBuffer, _sendBufferLength + 2, false);
-                _waitConfirm = false;
-                delete[] _sendBuffer;
-                _sendBuffer = 0;
-                _sendBufferLength = 0;
-                if (_loopState == RX_WAIT_DATA_CON)
-                    _loopState = IDLE;
-            }
+        // Check for spurios DATA_CONN message
+        if (dataConnMsg && _txState != TX_WAIT_CONN && _txState != TX_WAIT_ECHO) {
+            println("got unexpected L_DATA_CON");
         }
-    } 
-    while (false);
-    // add this, if we loose ACK due to long loop times in other modules
-    // this processes the first 8 Bytes of a KNX message (so until an ACK is sent)
-    // without returning to mail loop. Might increase loop times by about 5.6ms
-    // while (_loopState == RX_L_DATA && _RxByteCnt < 7);
+
+        switch (_txState)
+        {
+            case TX_IDLE:
+                if (!isTxQueueEmpty())
+                {
+                    loadNextTxFrame();
+                    _txState = TX_FRAME;
+#ifdef DBG_TRACE
+                    println("TX_FRAME");
+#endif
+                }
+                break;
+            case TX_FRAME:
+                if (sendSingleFrameByte() == false)
+                {
+                    _waitConfirmStartTime = millis();
+                    _txState = TX_WAIT_ECHO;
+#ifdef DBG_TRACE
+                    println("TX_WAIT_ECHO");
+#endif
+                }
+                break;
+            case TX_WAIT_ECHO:
+            case TX_WAIT_CONN:
+                if (isEchoComplete)
+                {
+                    _txState = TX_WAIT_CONN;
+#ifdef DBG_TRACE
+                    println("TX_WAIT_CONN");
+#endif
+                }
+                else if (dataConnMsg)
+                {
+                    bool waitEcho = (_txState == TX_WAIT_ECHO);
+                    if (waitEcho) {
+                        println("L_DATA_CON without echo");
+                    }
+                    dataConBytesReceived(_receiveBuffer, _RxByteCnt + 2, !waitEcho && ((dataConnMsg & SUCCESS) > 0));
+                    delete[] _sendBuffer;
+                    _sendBuffer = 0;
+                    _sendBufferLength = 0;
+                    _txState = TX_IDLE;
+                }
+                else if (millis() - _waitConfirmStartTime > CONFIRM_TIMEOUT)
+                {
+                    println("L_DATA_CON not received within expected time");
+                    uint8_t cemiBuffer[MAX_KNX_TELEGRAM_SIZE];
+                    cemiBuffer[0] = 0x29;
+                    cemiBuffer[1] = 0;
+                    memcpy((cemiBuffer + 2), _sendBuffer, _sendBufferLength);
+                    dataConBytesReceived(cemiBuffer, _sendBufferLength + 2, false);
+                    delete[] _sendBuffer;
+                    _sendBuffer = 0;
+                    _sendBufferLength = 0;
+                    _txState = TX_IDLE;
+#ifdef DBG_TRACE
+                    println("TX_IDLE");
+#endif
+                }
+                break;
+        }
+    } while (_rxState == RX_L_DATA);
 }
 
 bool TpUartDataLinkLayer::sendFrame(CemiFrame& frame)
@@ -506,6 +560,9 @@ bool TpUartDataLinkLayer::sendSingleFrameByte()
             cmd[0] = U_L_DATA_END_REQ | _TxByteCnt;
 
         cmd[1] = _sendBuffer[_TxByteCnt];
+#ifdef DBG_TRACE
+        print(cmd[1], HEX);
+#endif
 
         _platform.writeUart(cmd, 2);
         _TxByteCnt++;
