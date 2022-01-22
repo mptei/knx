@@ -94,6 +94,7 @@ enum {
 #define EOP_TIMEOUT           2   //milli seconds; end of layer-2 packet gap
 #define CONFIRM_TIMEOUT       500  //milli seconds
 #define RESET_TIMEOUT         100 //milli seconds
+#define TX_THROTTLE_TIME      1 //milli seconds
 
 void TpUartDataLinkLayer::loop()
 {
@@ -310,6 +311,7 @@ void TpUartDataLinkLayer::loop()
                         }
 
                         // Hint: We can send directly here, this doesn't disturb other transmissions
+                        // We don't have to update _lastByteTxTime because after ACK the timing is not so tight
                         _platform.writeUart(c);
                     }
                 }
@@ -392,13 +394,20 @@ void TpUartDataLinkLayer::loop()
             }
             break;
         case TX_FRAME:
-            if (sendSingleFrameByte() == false)
+            if (millis() - _lastByteTxTime >= TX_THROTTLE_TIME)
             {
-                _waitConfirmStartTime = millis();
-                _txState = TX_WAIT_ECHO;
+                if (sendSingleFrameByte() == false)
+                {
+                    _waitConfirmStartTime = millis();
+                    _txState = TX_WAIT_ECHO;
 #ifdef DBG_TRACE
-                println("TX_WAIT_ECHO");
+                    println("TX_WAIT_ECHO");
 #endif
+                }
+                else
+                {
+                    _lastByteTxTime = millis();
+                }
             }
             break;
         case TX_WAIT_ECHO:
