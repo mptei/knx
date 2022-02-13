@@ -257,7 +257,6 @@ void TpUartDataLinkLayer::loop()
                     {
                         _rxState = RX_WAIT_START;
                         print("EOPR inside RX_L_ADDR");
-                        printHex(" => ", buffer, _RxByteCnt);
                         break;
                     }
                     if (!_platform.uartAvailable())
