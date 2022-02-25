@@ -83,7 +83,6 @@
 enum {
     TX_IDLE,
     TX_FRAME,
-    TX_WAIT_ECHO,
     TX_WAIT_CONN
 };
 
@@ -136,7 +135,6 @@ void TpUartDataLinkLayer::loop()
     // Loop once and repeat as long we have rx data available
     do {
         // Signals to communicate from rx part with the tx part
-        bool isEchoComplete = false;    // Flag that a complete echo is received
         uint8_t dataConnMsg = 0;  // The DATA_CONN message just seen or 0
 
 #ifdef KNX_WAIT_FOR_ADDR
@@ -294,22 +292,14 @@ void TpUartDataLinkLayer::loop()
                     if (_RxByteCnt == 7)
                     {
                         //Destination Address + payload available
-                        //check if echo
-                        if (_sendBuffer != nullptr && (!((buffer[0] ^ _sendBuffer[0]) & ~0x20) && !memcmp(buffer + _convert + 1, _sendBuffer + 1, 5)))
-                        { //ignore repeated bit of control byte
-                            _isEcho = true;
-                        }
-                        else
-                        {
-                            _isEcho = false;
-                        }
+                        //check if echo; ignore repeat bit of control byte
+                        _isEcho = (_sendBuffer != nullptr && (!((buffer[0] ^ _sendBuffer[0]) & ~0x20) && !memcmp(buffer + _convert + 1, _sendBuffer + 1, 5)));
 
                         //convert into Extended.ind
                         if (_convert)
                         {
-                            uint8_t payloadLength = buffer[6] & 0x0F;
                             buffer[1] = buffer[6] & 0xF0;
-                            buffer[6] = payloadLength;
+                            buffer[6] &= 0x0F;
                         }
 
                         if (!_isEcho)
@@ -372,22 +362,10 @@ void TpUartDataLinkLayer::loop()
                     if (_RxByteCnt == buffer[6] + 7 + 2)
                     {
                         //complete Frame received, payloadLength+1 for TCPI +1 for CRC
+                        //check if crc is correct
                         if (rxByte == (uint8_t)(~_xorSum))
                         {
-                            //check if crc is correct
-                            if (_isEcho && _sendBuffer != NULL)
-                            {
-                                //check if it is realy an echo, rx_crc = tx_crc
-                                if (rxByte == _sendBuffer[_sendBufferLength - 1])
-                                    _isEcho = true;
-                                else
-                                    _isEcho = false;
-                            }
-                            if (_isEcho)
-                            {
-                                isEchoComplete = true;
-                            }
-                            else
+                            if (!_isEcho)
                             {
                                 _receiveBuffer[0] = 0x29;
                                 _receiveBuffer[1] = 0;
@@ -442,8 +420,8 @@ void TpUartDataLinkLayer::loop()
         } while (_rxState == RX_L_ADDR && (stayInRx || _platform.uartAvailable()));
 
         // Check for spurios DATA_CONN message
-        if (dataConnMsg && _txState != TX_WAIT_CONN && _txState != TX_WAIT_ECHO) {
-            println("got unexpected L_DATA_CON");
+        if (dataConnMsg && _txState != TX_WAIT_CONN) {
+            println("unexpected L_DATA_CON");
         }
 
         switch (_txState)
@@ -464,9 +442,9 @@ void TpUartDataLinkLayer::loop()
                     if (sendSingleFrameByte() == false)
                     {
                         _waitConfirmStartTime = millis();
-                        _txState = TX_WAIT_ECHO;
+                        _txState = TX_WAIT_CONN;
 #ifdef DBG_TRACE
-                        println("TX_WAIT_ECHO");
+                        println("TX_WAIT_CONN");
 #endif
                     }
                     else
@@ -475,22 +453,10 @@ void TpUartDataLinkLayer::loop()
                     }
                 }
                 break;
-            case TX_WAIT_ECHO:
             case TX_WAIT_CONN:
-                if (isEchoComplete)
+                if (dataConnMsg)
                 {
-                    _txState = TX_WAIT_CONN;
-#ifdef DBG_TRACE
-                    println("TX_WAIT_CONN");
-#endif
-                }
-                else if (dataConnMsg)
-                {
-                    bool waitEcho = (_txState == TX_WAIT_ECHO);
-                    if (waitEcho) {
-                        println("L_DATA_CON without echo");
-                    }
-                    dataConBytesReceived(_receiveBuffer, _RxByteCnt + 2, !waitEcho && ((dataConnMsg & SUCCESS) > 0));
+                    dataConBytesReceived(_receiveBuffer, _RxByteCnt + 2, (dataConnMsg & SUCCESS));
                     delete[] _sendBuffer;
                     _sendBuffer = 0;
                     _sendBufferLength = 0;
@@ -631,9 +597,9 @@ bool TpUartDataLinkLayer::sendSingleFrameByte()
         }
 
         if (_TxByteCnt != _sendBufferLength - 1)
-            cmd[0] = U_L_DATA_START_CONT_REQ | _TxByteCnt;
+            cmd[0] = U_L_DATA_START_CONT_REQ | (_TxByteCnt & 0x3f);
         else
-            cmd[0] = U_L_DATA_END_REQ | _TxByteCnt;
+            cmd[0] = U_L_DATA_END_REQ | (_TxByteCnt & 0x3f);
 
         cmd[1] = _sendBuffer[_TxByteCnt];
 #ifdef DBG_TRACE
